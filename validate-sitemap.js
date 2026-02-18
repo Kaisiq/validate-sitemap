@@ -15,7 +15,7 @@ const __dirname = path.dirname(__filename);
 
 const LOCALES = ["en", "es", "pt", "cn", "kr", "jp", "de", "fr", "it"];
 const BASE_URL = "http://localhost:5001";
-const URLS_FILE = path.join(__dirname, "to-verify");
+const URLS_FILE = path.join(__dirname, "to-verify-sitemap");
 
 // Colors for console output
 const colors = {
@@ -123,8 +123,9 @@ async function fetchAllSitemaps() {
 
 /**
  * Validate that all URLs from file are in scraped sitemaps
+ * and check the HTTP status of missing URLs.
  */
-function validateUrls(fileUrls, scrapedUrls) {
+async function validateUrls(fileUrls, scrapedUrls) {
   log("\n🔍 Validating URLs...", "blue");
 
   const missing = [];
@@ -144,9 +145,10 @@ function validateUrls(fileUrls, scrapedUrls) {
   }
 
   log(
-    `\n⚠️  Found ${missing.length} URLs that are missing from scraped sitemaps:`,
+    `\n⚠️  Found ${missing.length} URLs that are missing from scraped sitemaps.`,
     "red",
   );
+  log("📡 Checking HTTP status for missing URLs...\n", "blue");
 
   // Group missing URLs by locale for better readability
   const missingByLocale = {};
@@ -167,11 +169,23 @@ function validateUrls(fileUrls, scrapedUrls) {
   }
 
   for (const [locale, urls] of Object.entries(missingByLocale)) {
-    log(`\n  ${locale.toUpperCase()} (${urls.length} missing):`, "yellow");
-    urls.slice(0, 10).forEach((url) => log(`    - ${url}`, "red"));
-    if (urls.length > 10) {
-      log(`    ... and ${urls.length - 10} more`, "red");
+    log(`  ${locale.toUpperCase()} (${urls.length} missing):`, "yellow");
+    for (const url of urls) {
+      try {
+        const response = await fetch(url);
+        const status = response.status;
+        if (status === 404) {
+          log(`    ✗ [404] ${url}`, "red");
+        } else if (response.ok) {
+          log(`    ✓ [${status}] ${url}`, "green");
+        } else {
+          log(`    ⚠️ [${status}] ${url}`, "yellow");
+        }
+      } catch (error) {
+        log(`    ✗ [ERR] ${url}: ${error.message}`, "red");
+      }
     }
+    log(""); // Add a newline between locales
   }
 
   return { allFound: false, missing, found };
@@ -242,7 +256,7 @@ async function main() {
     const { scrapedUrls, results } = await fetchAllSitemaps();
 
     // Validate URLs
-    const validation = validateUrls(fileUrls, scrapedUrls);
+    const validation = await validateUrls(fileUrls, scrapedUrls);
 
     // Print summary
     printSummary(results, fileUrls, scrapedUrls, validation);
