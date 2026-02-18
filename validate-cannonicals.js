@@ -1,89 +1,111 @@
-import fs from 'fs';
-import readline from 'readline';
-import http from 'http';
-import https from 'https';
+import fs from "fs";
+import readline from "readline";
+import http from "http";
+import https from "https";
 
-const URLS_FILE = './to-verify-canonicals';
+const URLS_FILE = "./to-verify-canonicals";
+const LOCAL_BASE = "http://localhost:5001";
+
+function toLocalUrl(url) {
+  try {
+    const u = new URL(url);
+    return LOCAL_BASE + u.pathname + u.search;
+  } catch {
+    return url;
+  }
+}
 
 // Fetch URL and extract canonical link
 async function fetchCanonical(url) {
   return new Promise((resolve, reject) => {
-    const client = url.startsWith('https') ? https : http;
+    const client = url.startsWith("https") ? https : http;
 
     const req = client.get(url, { timeout: 10000 }, (res) => {
       // Check for 404 status
       if (res.statusCode === 404) {
         req.destroy();
-        resolve({ url, canonical: null, error: 'Page not found (404)', statusCode: 404 });
+        resolve({
+          url,
+          canonical: null,
+          error: "Page not found (404)",
+          statusCode: 404,
+        });
         return;
       }
 
       // Check for other non-200 status codes
       if (res.statusCode !== 200) {
         req.destroy();
-        resolve({ url, canonical: null, error: `HTTP ${res.statusCode}`, statusCode: res.statusCode });
+        resolve({
+          url,
+          canonical: null,
+          error: `HTTP ${res.statusCode}`,
+          statusCode: res.statusCode,
+        });
         return;
       }
 
-      let data = '';
+      let data = "";
+      let resolved = false;
 
-      res.on('data', (chunk) => {
-        data += chunk;
-        // Stop collecting data once we have the head section
-        if (data.includes('</head>')) {
-          req.destroy();
-        }
-      });
+      function processData() {
+        if (resolved) return;
+        resolved = true;
 
-      res.on('end', () => {
-        // Extract canonical link from head
-        const headMatch = data.match(/<head[^>]*>([\s\S]*?)<\/head>/i);
-        if (!headMatch) {
-          resolve({ url, canonical: null, error: 'No <head> tag found' });
-          return;
-        }
-
-        const head = headMatch[1];
-        const canonicalMatch = head.match(/<link[^>]*rel=["']canonical["'][^>]*>/i) ||
-                              head.match(/<link[^>]*href=["']([^"']+)["'][^>]*rel=["']canonical["'][^>]*>/i);
+        const canonicalMatch =
+          data.match(/<link[^>]*rel=["']canonical["'][^>]*>/i) ||
+          data.match(
+            /<link[^>]*href=["']([^"']+)["'][^>]*rel=["']canonical["'][^>]*>/i,
+          );
 
         if (!canonicalMatch) {
-          resolve({ url, canonical: null, error: 'No canonical link found' });
+          resolve({ url, canonical: null, error: "No canonical link found" });
           return;
         }
 
-        // Extract href attribute
         const hrefMatch = canonicalMatch[0].match(/href=["']([^"']+)["']/i);
         if (!hrefMatch) {
-          resolve({ url, canonical: null, error: 'Canonical link has no href' });
+          resolve({
+            url,
+            canonical: null,
+            error: "Canonical link has no href",
+          });
           return;
         }
 
         resolve({ url, canonical: hrefMatch[1], error: null });
+      }
+
+      res.on("data", (chunk) => {
+        data += chunk;
+      });
+
+      res.on("end", () => {
+        processData();
       });
     });
 
-    req.on('error', (err) => {
+    req.on("error", (err) => {
       resolve({ url, canonical: null, error: err.message });
     });
 
-    req.on('timeout', () => {
+    req.on("timeout", () => {
       req.destroy();
-      resolve({ url, canonical: null, error: 'Request timeout' });
+      resolve({ url, canonical: null, error: "Request timeout" });
     });
   });
 }
 
 // Normalize URLs for comparison (remove trailing slashes, etc.)
 function normalizeUrl(url) {
-  return url.replace(/\/$/, '').toLowerCase();
+  return url.replace(/\/$/, "").toLowerCase();
 }
 
 async function validateCanonicals() {
   const fileStream = fs.createReadStream(URLS_FILE);
   const rl = readline.createInterface({
     input: fileStream,
-    crlfDelay: Infinity
+    crlfDelay: Infinity,
   });
 
   const results = {
@@ -91,7 +113,7 @@ async function validateCanonicals() {
     invalid: [],
     missing: [],
     notFound: [],
-    errors: []
+    errors: [],
   };
 
   const urls = [];
@@ -113,7 +135,7 @@ async function validateCanonicals() {
   for (let i = 0; i < urls.length; i += concurrency) {
     const batch = urls.slice(i, i + concurrency);
     const batchResults = await Promise.all(
-      batch.map(url => fetchCanonical(url))
+      batch.map((url) => fetchCanonical(toLocalUrl(url))),
     );
 
     for (const result of batchResults) {
@@ -122,35 +144,47 @@ async function validateCanonicals() {
       if (result.error) {
         if (result.statusCode === 404) {
           results.notFound.push(result.url);
-          console.log(`[${processed}/${urls.length}] 🚫 NOT FOUND (404): ${result.url}`);
-        } else if (result.error === 'No canonical link found') {
+          console.log(
+            `[${processed}/${urls.length}] 🚫 NOT FOUND (404): ${result.url}`,
+          );
+        } else if (result.error === "No canonical link found") {
           results.missing.push(result.url);
-          console.log(`[${processed}/${urls.length}] ❌ MISSING: ${result.url}`);
+          console.log(
+            `[${processed}/${urls.length}] ❌ MISSING: ${result.url}`,
+          );
         } else {
           results.errors.push({ url: result.url, error: result.error });
-          console.log(`[${processed}/${urls.length}] ⚠️  ERROR: ${result.url} - ${result.error}`);
+          console.log(
+            `[${processed}/${urls.length}] ⚠️  ERROR: ${result.url} - ${result.error}`,
+          );
         }
       } else {
-        const normalizedOriginal = normalizeUrl(result.url);
-        const normalizedCanonical = normalizeUrl(result.canonical);
+        // Compare by path only — canonical on localhost likely still says chaos.com
+        const originalPath = normalizeUrl(new URL(result.url).pathname);
+        const canonicalPath = normalizeUrl(new URL(result.canonical).pathname);
 
-        if (normalizedOriginal === normalizedCanonical) {
+        if (originalPath === canonicalPath) {
           results.valid.push(result.url);
           console.log(`[${processed}/${urls.length}] ✅ VALID: ${result.url}`);
         } else {
-          results.invalid.push({ url: result.url, canonical: result.canonical });
-          console.log(`[${processed}/${urls.length}] ❌ MISMATCH: ${result.url}`);
-          console.log(`    Expected: ${result.url}`);
-          console.log(`    Got:      ${result.canonical}`);
+          results.invalid.push({
+            url: result.url,
+            canonical: result.canonical,
+          });
+          console.log(
+            `[${processed}/${urls.length}] ❌ MISMATCH: ${result.url}`,
+          );
+          console.log(`    Expected path: ${originalPath}`);
+          console.log(`    Got:           ${result.canonical}`);
         }
       }
     }
   }
 
   // Print summary
-  console.log('\n' + '='.repeat(80));
-  console.log('SUMMARY');
-  console.log('='.repeat(80));
+  console.log("\n" + "=".repeat(80));
+  console.log("SUMMARY");
+  console.log("=".repeat(80));
   console.log(`✅ Valid canonicals:    ${results.valid.length}`);
   console.log(`❌ Mismatched:          ${results.invalid.length}`);
   console.log(`❌ Missing canonicals:  ${results.missing.length}`);
@@ -159,9 +193,9 @@ async function validateCanonicals() {
   console.log(`📊 Total processed:     ${urls.length}`);
 
   if (results.invalid.length > 0) {
-    console.log('\n' + '-'.repeat(80));
-    console.log('MISMATCHED CANONICALS:');
-    console.log('-'.repeat(80));
+    console.log("\n" + "-".repeat(80));
+    console.log("MISMATCHED CANONICALS:");
+    console.log("-".repeat(80));
     results.invalid.forEach(({ url, canonical }) => {
       console.log(`\n${url}`);
       console.log(`  → ${canonical}`);
@@ -169,34 +203,37 @@ async function validateCanonicals() {
   }
 
   if (results.missing.length > 0 && results.missing.length <= 20) {
-    console.log('\n' + '-'.repeat(80));
-    console.log('MISSING CANONICALS:');
-    console.log('-'.repeat(80));
-    results.missing.forEach(url => console.log(`  ${url}`));
+    console.log("\n" + "-".repeat(80));
+    console.log("MISSING CANONICALS:");
+    console.log("-".repeat(80));
+    results.missing.forEach((url) => console.log(`  ${url}`));
   }
 
   if (results.notFound.length > 0 && results.notFound.length <= 20) {
-    console.log('\n' + '-'.repeat(80));
-    console.log('NOT FOUND (404):');
-    console.log('-'.repeat(80));
-    results.notFound.forEach(url => console.log(`  ${url}`));
+    console.log("\n" + "-".repeat(80));
+    console.log("NOT FOUND (404):");
+    console.log("-".repeat(80));
+    results.notFound.forEach((url) => console.log(`  ${url}`));
   }
 
   if (results.errors.length > 0 && results.errors.length <= 20) {
-    console.log('\n' + '-'.repeat(80));
-    console.log('ERRORS:');
-    console.log('-'.repeat(80));
+    console.log("\n" + "-".repeat(80));
+    console.log("ERRORS:");
+    console.log("-".repeat(80));
     results.errors.forEach(({ url, error }) => {
       console.log(`  ${url}: ${error}`);
     });
   }
 
   // Exit with error code if there are issues (excluding 404s as they're expected)
-  const hasIssues = results.invalid.length > 0 || results.missing.length > 0 || results.errors.length > 0;
+  const hasIssues =
+    results.invalid.length > 0 ||
+    results.missing.length > 0 ||
+    results.errors.length > 0;
   process.exit(hasIssues ? 1 : 0);
 }
 
-validateCanonicals().catch(err => {
-  console.error('Fatal error:', err);
+validateCanonicals().catch((err) => {
+  console.error("Fatal error:", err);
   process.exit(1);
 });
