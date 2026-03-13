@@ -15,7 +15,7 @@ const __dirname = path.dirname(__filename);
 
 const LOCALES = ["en", "es", "pt", "cn", "kr", "jp", "de", "fr", "it"];
 const BASE_URL = "http://localhost:5001";
-const URLS_FILE = path.join(__dirname, "to-verify-sitemap");
+const URLS_FILE = path.join(__dirname, "input-shouldmiss");
 
 // Colors for console output
 const colors = {
@@ -122,17 +122,36 @@ async function fetchAllSitemaps() {
 }
 
 /**
+ * Extract path from URL for comparison (ignores domain)
+ */
+function getUrlPath(url) {
+  try {
+    const urlObj = new URL(url);
+    return urlObj.pathname;
+  } catch {
+    return url;
+  }
+}
+
+/**
  * Validate that all URLs from file are in scraped sitemaps
  * and check the HTTP status of missing URLs.
  */
 async function validateUrls(fileUrls, scrapedUrls) {
   log("\n🔍 Validating URLs...", "blue");
 
+  // Create a map of paths from scraped URLs for comparison
+  const scrapedPaths = new Set();
+  for (const url of scrapedUrls) {
+    scrapedPaths.add(getUrlPath(url));
+  }
+
   const missing = [];
   const found = [];
 
   for (const url of fileUrls) {
-    if (scrapedUrls.has(url)) {
+    const path = getUrlPath(url);
+    if (scrapedPaths.has(path)) {
       found.push(url);
     } else {
       missing.push(url);
@@ -153,14 +172,10 @@ async function validateUrls(fileUrls, scrapedUrls) {
   // Group missing URLs by locale for better readability
   const missingByLocale = {};
   for (const url of missing) {
-    const match =
-      url.match(/localhost:5001\/([a-z]{2})\//) ||
-      url.match(/localhost:5001\/(.*)/);
-    const locale = match
-      ? LOCALES.includes(match[1])
-        ? match[1]
-        : "en"
-      : "unknown";
+    const path = getUrlPath(url);
+    // Match locale from path (e.g., /de/, /es/, /fr/)
+    const match = path.match(/^\/([a-z]{2})\//);
+    const locale = match && LOCALES.includes(match[1]) ? match[1] : "en";
 
     if (!missingByLocale[locale]) {
       missingByLocale[locale] = [];
@@ -171,18 +186,26 @@ async function validateUrls(fileUrls, scrapedUrls) {
   for (const [locale, urls] of Object.entries(missingByLocale)) {
     log(`  ${locale.toUpperCase()} (${urls.length} missing):`, "yellow");
     for (const url of urls) {
+      const localUrl = `${BASE_URL}${getUrlPath(url)}`;
       try {
-        const response = await fetch(url);
+        const response = await fetch(localUrl, { redirect: "manual" });
         const status = response.status;
+        const isRedirect = status >= 300 && status < 400;
         if (status === 404) {
-          log(`    ✗ [404] ${url}`, "red");
+          log(`    ✗ [404] ${localUrl}`, "red");
+        } else if (isRedirect) {
+          const location = response.headers.get("location") || "";
+          log(
+            `    ↪ [${status}] ${localUrl} → ${location} (redirect, not in sitemap)`,
+            "yellow",
+          );
         } else if (response.ok) {
-          log(`    ✓ [${status}] ${url}`, "green");
+          log(`    ✓ [${status}] ${localUrl}`, "green");
         } else {
-          log(`    ⚠️ [${status}] ${url}`, "yellow");
+          log(`    ⚠️ [${status}] ${localUrl}`, "yellow");
         }
       } catch (error) {
-        log(`    ✗ [ERR] ${url}: ${error.message}`, "red");
+        log(`    ✗ [ERR] ${localUrl}: ${error.message}`, "red");
       }
     }
     log(""); // Add a newline between locales
