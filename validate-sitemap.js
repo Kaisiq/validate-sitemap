@@ -15,7 +15,7 @@ const __dirname = path.dirname(__filename);
 
 const LOCALES = ["en", "es", "pt", "cn", "kr", "jp", "de", "fr", "it"];
 const BASE_URL = "http://localhost:5001";
-const URLS_FILE = path.join(__dirname, "input-shouldmiss");
+const URLS_FILE = path.join(__dirname, "input");
 
 // Colors for console output
 const colors = {
